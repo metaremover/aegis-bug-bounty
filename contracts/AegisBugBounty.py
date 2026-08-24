@@ -5,11 +5,14 @@ AegisBugBounty — Autonomous Zero-Day Vulnerability Disclosure & Patch Escrow
 An Intelligent Contract on GenLayer that creates a decentralized, trustless vulnerability
 disclosure clearinghouse for Web3 protocols and whitehat security researchers.
 
-Architectural Invariants & Reviewer Safeguards:
+Architectural Invariants & Reviewer Safeguards (Joaquin Review Hardened):
 1. Program-Bound Collateral Escrow: Protocols bond maximum bounty pools (USDC) with tier caps.
 2. Semantic CVE & Git Patch Audit: AI validators evaluate CVSS v3.1 severity, exploit proof-of-concepts, and mitigation patch diffs.
 3. Access Control & Authorization: Audit execution restricted to authorized security triage operators, sponsors, or whitehat claimants.
-4. Anti-Replay Unique Audit IDs: Reused report IDs are strictly rejected on-chain (assert id not in self.bounty_reports).
+4. Multi-Layer Anti-Replay Uniqueness Binding:
+   - Report ID Uniqueness: Prevents duplicate report ID submissions (assert id not in self.bounty_reports).
+   - Program-Bound CVE Uniqueness: Prevents re-submitting the same CVE under different report IDs to double-claim bounties (disbursed_cves).
+   - Advisory Feed Uniqueness: Binds underlying advisory URL to prevent repeated payout debits on identical disclosure feeds (disbursed_advisories).
 5. Single-Round Unified Consensus: Combines 24/7 UTC Atomic Clock (timeapi.io) and CVE advisory DOM in 1 parallel prompt.
 6. 100% Fail-Closed Resilience: Reverts and preserves protocol bounty funds if advisory DOM is unparseable or forged.
 """
@@ -56,6 +59,8 @@ class AegisBugBounty(gl.Contract):
     operator: str
     programs: TreeMap[str, BountyProgram]
     bounty_reports: TreeMap[str, VulnerabilityReport]
+    disbursed_cves: TreeMap[str, bool]
+    disbursed_advisories: TreeMap[str, bool]
     authorized_triagers: TreeMap[str, bool]
     authorized_sources: TreeMap[str, bool]
     total_programs: u256
@@ -180,6 +185,11 @@ class AegisBugBounty(gl.Contract):
         assert is_bound_url or is_whitelisted, \
             f"[ERR_TELEMETRY_AUTH] Unauthorized advisory feed: {clean_url} is not authorized for program {p_id}."
 
+        # INVARIANT 4: PRE-AUDIT ADVISORY REPLAY GUARD (Joaquin Review Hardened)
+        advisory_key = f"{p_id}:{clean_url.lower()}"
+        assert advisory_key not in self.disbursed_advisories, \
+            f"[ERR_REPLAY_03] Advisory '{clean_url}' has already been processed for bounty payout in program '{p_id}'."
+
         curr_pool = int(program.total_pool_usdc)
         curr_paid = int(program.paid_bounties_usdc)
         max_crit = int(program.max_critical_bounty_usdc)
@@ -280,11 +290,17 @@ class AegisBugBounty(gl.Contract):
         assert advisory_valid == True, "[ERR_TELEMETRY_01] Advisory telemetry stream invalid or inaccessible (Fail-Closed)."
 
         verdict = str(res_parsed.get("security_verdict", "INVALID_REJECTED")).strip().upper()
-        cve_id = str(res_parsed.get("cve_identifier", "CVE-UNKNOWN")).strip()
+        cve_id = str(res_parsed.get("cve_identifier", "CVE-UNKNOWN")).strip().upper()
         v_type = str(res_parsed.get("vulnerability_type", "UNKNOWN")).strip().upper()
         cvss_x10 = int(res_parsed.get("cvss_score_x10", 0))
         reasoning = str(res_parsed.get("reasoning", "Vulnerability advisory audited."))
         today_str = str(res_parsed.get("today_date", "2026-08-23"))
+
+        # INVARIANT 5: PROGRAM-BOUND CVE UNIQUENESS GUARD (Joaquin Review Hardened)
+        if verdict in ("CRITICAL_EXPLOIT_VERIFIED", "MEDIUM_SEVERITY_APPROVED"):
+            cve_key = f"{p_id}:{cve_id}"
+            assert cve_key not in self.disbursed_cves, \
+                f"[ERR_REPLAY_02] Bounty for CVE '{cve_id}' in program '{p_id}' has already been claimed and disbursed."
 
         # Bounty Calculation State Machine
         if verdict == "CRITICAL_EXPLOIT_VERIFIED":
@@ -296,6 +312,12 @@ class AegisBugBounty(gl.Contract):
         else: # INVALID_REJECTED
             bounty_amount = 0
             summary = f"REPORT REJECTED: {r_id} ({cve_id}) classified as INVALID_REJECTED. Zero bounty disbursed. {reasoning}"
+
+        # Record Disbursed Keys on Successful Payouts
+        if bounty_amount > 0:
+            cve_key = f"{p_id}:{cve_id}"
+            self.disbursed_cves[cve_key] = True
+            self.disbursed_advisories[advisory_key] = True
 
         new_paid = curr_paid + bounty_amount
         new_status = "DEPLETED_FROZEN" if new_paid >= curr_pool else "ACTIVE_OPEN"
@@ -346,6 +368,18 @@ class AegisBugBounty(gl.Contract):
         r_key = report_id.strip()
         assert r_key in self.bounty_reports, "[ERR_STATE_02] Report ID not found."
         return self.bounty_reports[r_key]
+
+    @gl.public.view
+    def is_cve_disbursed(self, program_id: str, cve_identifier: str) -> bool:
+        """Verifies if a specific CVE has already been disbursed for a program."""
+        key = f"{program_id.strip()}:{cve_identifier.strip().upper()}"
+        return bool(self.disbursed_cves.get(key, False))
+
+    @gl.public.view
+    def is_advisory_disbursed(self, program_id: str, advisory_url: str) -> bool:
+        """Verifies if an advisory URL has already been processed for payout."""
+        key = f"{program_id.strip()}:{advisory_url.strip().strip('\"').strip('\'').lower()}"
+        return bool(self.disbursed_advisories.get(key, False))
 
     @gl.public.view
     def get_total_reports(self) -> u256:

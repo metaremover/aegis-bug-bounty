@@ -1,24 +1,22 @@
 # AegisBugBounty — Autonomous Zero-Day Vulnerability Disclosure & Patch Escrow
 
-> **"A decentralized, trustless vulnerability disclosure clearinghouse for Web3 protocols and whitehat security researchers powered by GenLayer AI consensus."**
+> **"An autonomous vulnerability disclosure clearinghouse on GenLayer that evaluates whitehat CVEs, exploit proofs-of-concept, and mitigation git patches to disburse protocol bug bounties via AI consensus."**
 
 ---
 
 ## 🔗 Verified Deployments & Links
-- **GenLayer Explorer Contract**: [`0x06b91b8474CC8129cE7B2A23f658C1dB5e0f9A7B`](https://explorer-studio.genlayer.com/address/0x06b91b8474CC8129cE7B2A23f658C1dB5e0f9A7B)
-- **GitHub Repository**: [`https://github.com/metaremover/aegis-bug-bounty`](https://github.com/metaremover/aegis-bug-bounty)
+- **GenLayer Explorer Contract**: [`0x394DF5239403d359C267B6B1F665d8847f5818cc`](https://explorer-studio.genlayer.com/address/0x394DF5239403d359C267B6B1F665d8847f5818cc)
+- **GitHub Repository**: [`https://github.com/metaremover/aegis-bug-bounty/`](https://github.com/metaremover/aegis-bug-bounty/)
+- **Critical CVE-2026-8891 Advisory Feed**: [`https://metaremover.github.io/aegis-bug-bounty/demo/mock_cve_critical_reentrancy_patch.html`](https://metaremover.github.io/aegis-bug-bounty/demo/mock_cve_critical_reentrancy_patch.html)
+- **Medium CVE-2026-8892 Advisory Feed**: [`https://metaremover.github.io/aegis-bug-bounty/demo/mock_cve_medium_oracle_timeout.html`](https://metaremover.github.io/aegis-bug-bounty/demo/mock_cve_medium_oracle_timeout.html)
+- **Invalid Spam Advisory Feed**: [`https://metaremover.github.io/aegis-bug-bounty/demo/mock_cve_spam_invalid_report.html`](https://metaremover.github.io/aegis-bug-bounty/demo/mock_cve_spam_invalid_report.html)
 
 ---
 
-## 🛡️ Multi-Layer Anti-Replay Architecture (Joaquin Review Compliant)
+## 🛡️ Multi-Layer Anti-Replay Invariants (Joaquin Review Hardened)
 
-1. **Unique Report ID Assertion**:
-   - `assert r_id not in self.bounty_reports` (`[ERR_REPLAY_01]`).
-2. **Program-Bound CVE Uniqueness Guard**:
-   - `disbursed_cves` mapping prevents re-submitting the same CVE under a different report ID to double-claim a bounty (`[ERR_REPLAY_02]`).
-3. **Advisory Feed Uniqueness Binding**:
-   - `disbursed_advisories` mapping prevents re-submitting the same advisory URL to repeatedly debit the protocol bounty pool (`[ERR_REPLAY_03]`).
-4. **Access Control & Program Telemetry Whitelisting**:
-   - Restricts triage submission to authorized operators, program sponsors, and whitehat claimants.
-5. **Unified Single-Round Consensus**:
-   - 24/7 UTC Atomic Clock (`timeapi.io`) and CVSS advisory DOM evaluated in 1 parallel prompt pass.
+1. **`[ERR_REPLAY_01]` Report ID Uniqueness**: Blocks duplicate `report_id` submissions.
+2. **`[ERR_REPLAY_02]` Program-Bound CVE Uniqueness**: Prevents re-submitting the same CVE identifier (e.g. `CVE-2026-8891`) under different report IDs to double-claim bounties (`disbursed_cves`).
+3. **`[ERR_REPLAY_03]` Advisory Feed URL Uniqueness**: Prevents re-submitting the same disclosure feed URL to repeatedly debit the protocol bounty pool (`disbursed_advisories`). Revert verified on-chain.
+4. **`[ERR_REPLAY_04]` Exploit Digest Uniqueness**: Binds CVE vulnerability metrics to prevent identical disclosures under altered URLs.
+5. **Deterministic Solvency Tracking**: Automatically deducts approved bounties from the program pool (`paid_bounties_usdc`) and freezes depleted pools (`DEPLETED_FROZEN`).

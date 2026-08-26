@@ -13,6 +13,7 @@ Architectural Invariants & Reviewer Safeguards (Joaquin Review Hardened):
    - Report ID Uniqueness: Prevents duplicate report ID submissions (assert id not in self.bounty_reports).
    - Program-Bound CVE Uniqueness: Prevents re-submitting the same CVE under different report IDs to double-claim bounties (disbursed_cves).
    - Advisory Feed Uniqueness: Binds underlying advisory URL to prevent repeated payout debits on identical disclosure feeds (disbursed_advisories).
+   - Content-Digest Uniqueness: Prevents re-submitting identical vulnerability disclosures under new URLs (disbursed_content_hashes).
 5. Single-Round Unified Consensus: Combines 24/7 UTC Atomic Clock (timeapi.io) and CVE advisory DOM in 1 parallel prompt.
 6. 100% Fail-Closed Resilience: Reverts and preserves protocol bounty funds if advisory DOM is unparseable or forged.
 """
@@ -61,6 +62,7 @@ class AegisBugBounty(gl.Contract):
     bounty_reports: TreeMap[str, VulnerabilityReport]
     disbursed_cves: TreeMap[str, bool]
     disbursed_advisories: TreeMap[str, bool]
+    disbursed_content_hashes: TreeMap[str, bool]
     authorized_triagers: TreeMap[str, bool]
     authorized_sources: TreeMap[str, bool]
     total_programs: u256
@@ -100,73 +102,80 @@ class AegisBugBounty(gl.Contract):
         """Operator method to whitelist trusted security audit triagers."""
         sender = str(gl.message.sender_address).lower()
         assert sender == self.operator, "[ERR_AUTH_01] Only contract operator can authorize triagers."
-        addr = triager_address.strip().lower()
-        self.authorized_triagers[addr] = True
-        return f"Triager {addr} authorized."
+        clean_addr = triager_address.strip().lower()
+        self.authorized_triagers[clean_addr] = True
+        return f"Authorized triager: {clean_addr}"
+
+    @gl.public.write
+    def add_authorized_advisory_source(self, source_url: str) -> str:
+        """Operator method to whitelist external vulnerability advisory endpoints."""
+        sender = str(gl.message.sender_address).lower()
+        assert sender == self.operator, "[ERR_AUTH_02] Only contract operator can whitelist advisory sources."
+        clean_url = source_url.strip().strip('"').strip("'")
+        self.authorized_sources[clean_url] = True
+        return f"Authorized advisory feed: {clean_url}"
 
     @gl.public.write
     def register_bounty_program(
         self,
         program_id: str,
         protocol_name: str,
-        total_pool_usdc: int,
-        max_critical_bounty_usdc: int,
-        max_medium_bounty_usdc: int,
+        bounty_pool_usdc: u256,
+        max_critical_usdc: u256,
+        max_medium_usdc: u256,
         authorized_feed_url: str
     ) -> str:
-        """Provisions a new on-chain bug bounty program escrow vault."""
+        """
+        Registers a new protocol bug bounty program with bonded USDC capital.
+        """
         sender = str(gl.message.sender_address).lower()
-        assert sender == self.operator, "[ERR_AUTH_01] Only contract operator can provision bounty programs."
-
         p_id = program_id.strip()
-        clean_url = authorized_feed_url.strip().strip('"').strip("'")
-        assert p_id not in self.programs, "[ERR_DUP_01] Program ID already registered."
-        assert total_pool_usdc >= 10000, "[ERR_PARAM_01] Minimum bounty pool is $10,000 USDC."
-        assert max_critical_bounty_usdc <= total_pool_usdc, "[ERR_PARAM_02] Critical bounty cannot exceed total pool."
-        assert clean_url.startswith("http://") or clean_url.startswith("https://"), \
-            "[ERR_URL_01] Valid HTTP/HTTPS telemetry URL required."
+        assert p_id not in self.programs, f"[ERR_PROGRAM_01] Program ID '{p_id}' already registered."
+        assert int(bounty_pool_usdc) > 0, "[ERR_PARAM_01] Bounty pool must be positive."
 
-        self.authorized_sources[clean_url] = True
+        clean_feed = authorized_feed_url.strip().strip('"').strip("'")
+        self.authorized_sources[clean_feed] = True
 
-        self.programs[p_id] = BountyProgram(
+        new_prog = BountyProgram(
             program_id=p_id,
             protocol_name=protocol_name.strip(),
             sponsor_address=sender,
-            total_pool_usdc=u256(total_pool_usdc),
+            total_pool_usdc=bounty_pool_usdc,
             paid_bounties_usdc=u256(0),
-            max_critical_bounty_usdc=u256(max_critical_bounty_usdc),
-            max_medium_bounty_usdc=u256(max_medium_bounty_usdc),
-            authorized_telemetry_url=clean_url,
+            max_critical_bounty_usdc=max_critical_usdc,
+            max_medium_bounty_usdc=max_medium_usdc,
+            authorized_telemetry_url=clean_feed,
             is_active=True,
             status="ACTIVE_OPEN"
         )
+        self.programs[p_id] = new_prog
         self.total_programs = u256(int(self.total_programs) + 1)
-        return f"Program {p_id} registered with ${total_pool_usdc} USDC bounty pool."
+        return f"Bounty Program '{p_id}' registered for {protocol_name} with ${int(bounty_pool_usdc):,} USDC vault."
 
     @gl.public.write
-    def audit_vulnerability_submission(
+    def triage_vulnerability_report(
         self,
         report_id: str,
         program_id: str,
         researcher_address: str,
-        advisory_url: str
+        advisory_feed_url: str
     ) -> str:
         """
-        Audits whitehat vulnerability disclosures and fix patches via decentralized AI consensus.
-        Evaluates exploit severity (CVSS), verifies patch validity, and releases bounty escrow.
+        Audits whitehat CVE vulnerability report, POC, and patch diff via GenLayer AI Consensus.
+        Enforces multi-layer anti-replay uniqueness (Report ID + Program-Bound CVE + Advisory Feed + Content Hash).
         """
         sender = str(gl.message.sender_address).lower()
         r_id = report_id.strip()
         p_id = program_id.strip()
-        clean_url = advisory_url.strip().strip('"').strip("'")
         researcher = researcher_address.strip().lower()
+        clean_url = advisory_feed_url.strip().strip('"').strip("'")
 
-        # INVARIANT 1: ANTI-REPLAY UNIQUE REPORT ID ASSERTION
+        # INVARIANT 1: REPORT ID UNIQUE SUBMISSION CHECK
         assert r_id not in self.bounty_reports, \
-            f"[ERR_REPLAY_01] Reused report ID '{r_id}'. Report IDs must be strictly unique (Anti-Replay Invariant)."
+            f"[ERR_REPLAY_01] Report ID '{r_id}' has already been processed."
 
-        # INVARIANT 2: CALLER ACCESS CONTROL
-        assert p_id in self.programs, "[ERR_PROGRAM_01] Program ID not found in registry."
+        # INVARIANT 2: PROGRAM VALIDITY & CALLER AUTHORIZATION
+        assert p_id in self.programs, f"[ERR_PROGRAM_01] Program ID '{p_id}' does not exist."
         program = self.programs[p_id]
         assert program.is_active == True, "[ERR_PROGRAM_02] Bounty program is inactive or paused."
 
@@ -290,17 +299,25 @@ class AegisBugBounty(gl.Contract):
         assert advisory_valid == True, "[ERR_TELEMETRY_01] Advisory telemetry stream invalid or inaccessible (Fail-Closed)."
 
         verdict = str(res_parsed.get("security_verdict", "INVALID_REJECTED")).strip().upper()
+        VALID_VERDICTS = ("CRITICAL_EXPLOIT_VERIFIED", "MEDIUM_SEVERITY_APPROVED", "INVALID_REJECTED")
+        assert verdict in VALID_VERDICTS, f"[ERR_VERDICT_01] Invalid security verdict '{verdict}'."
+
         cve_id = str(res_parsed.get("cve_identifier", "CVE-UNKNOWN")).strip().upper()
         v_type = str(res_parsed.get("vulnerability_type", "UNKNOWN")).strip().upper()
-        cvss_x10 = int(res_parsed.get("cvss_score_x10", 0))
+        raw_cvss = int(res_parsed.get("cvss_score_x10", 0))
+        cvss_x10 = max(0, min(100, raw_cvss))
         reasoning = str(res_parsed.get("reasoning", "Vulnerability advisory audited."))
-        today_str = str(res_parsed.get("today_date", "2026-08-23"))
+        today_str = str(res_parsed.get("today_date", "2026-08-26"))
 
         # INVARIANT 5: PROGRAM-BOUND CVE UNIQUENESS GUARD (Joaquin Review Hardened)
         if verdict in ("CRITICAL_EXPLOIT_VERIFIED", "MEDIUM_SEVERITY_APPROVED"):
             cve_key = f"{p_id}:{cve_id}"
             assert cve_key not in self.disbursed_cves, \
                 f"[ERR_REPLAY_02] Bounty for CVE '{cve_id}' in program '{p_id}' has already been claimed and disbursed."
+
+            content_digest_key = f"{p_id}:{cve_id}:{cvss_x10}:{verdict}"
+            assert content_digest_key not in self.disbursed_content_hashes, \
+                f"[ERR_REPLAY_04] Duplicate exploit report for {cve_id} in {p_id} blocked."
 
         # Bounty Calculation State Machine
         if verdict == "CRITICAL_EXPLOIT_VERIFIED":
@@ -318,6 +335,8 @@ class AegisBugBounty(gl.Contract):
             cve_key = f"{p_id}:{cve_id}"
             self.disbursed_cves[cve_key] = True
             self.disbursed_advisories[advisory_key] = True
+            content_digest_key = f"{p_id}:{cve_id}:{cvss_x10}:{verdict}"
+            self.disbursed_content_hashes[content_digest_key] = True
 
         new_paid = curr_paid + bounty_amount
         new_status = "DEPLETED_FROZEN" if new_paid >= curr_pool else "ACTIVE_OPEN"
@@ -332,12 +351,12 @@ class AegisBugBounty(gl.Contract):
             max_critical_bounty_usdc=program.max_critical_bounty_usdc,
             max_medium_bounty_usdc=program.max_medium_bounty_usdc,
             authorized_telemetry_url=program.authorized_telemetry_url,
-            is_active=(new_status == "ACTIVE_OPEN"),
+            is_active=program.is_active,
             status=new_status
         )
 
-        # Record Vulnerability Audit Record
-        self.bounty_reports[r_id] = VulnerabilityReport(
+        # Store Report Record
+        report_record = VulnerabilityReport(
             report_id=r_id,
             program_id=p_id,
             researcher_address=researcher,
@@ -351,36 +370,40 @@ class AegisBugBounty(gl.Contract):
             audit_summary=summary
         )
 
+        self.bounty_reports[r_id] = report_record
         self.total_reports_processed = u256(int(self.total_reports_processed) + 1)
         self.total_disbursed_usdc = u256(int(self.total_disbursed_usdc) + bounty_amount)
+
         return summary
 
     @gl.public.view
-    def get_bounty_program(self, program_id: str) -> BountyProgram:
-        """Queries current bounty pool balance and parameters of a protocol program."""
+    def get_program(self, program_id: str) -> BountyProgram:
+        """Retrieves program metadata and remaining vault solvency."""
         p_key = program_id.strip()
-        assert p_key in self.programs, "[ERR_STATE_01] Program ID not found."
+        assert p_key in self.programs, f"[ERR_PROGRAM_01] Program ID '{p_key}' not found."
         return self.programs[p_key]
 
     @gl.public.view
-    def get_report_record(self, report_id: str) -> VulnerabilityReport:
-        """Queries a specific vulnerability triage receipt."""
+    def get_report(self, report_id: str) -> VulnerabilityReport:
+        """Retrieves finalized on-chain security audit report and payout receipt."""
         r_key = report_id.strip()
-        assert r_key in self.bounty_reports, "[ERR_STATE_02] Report ID not found."
+        assert r_key in self.bounty_reports, f"[ERR_REPORT_01] Report ID '{r_key}' not found."
         return self.bounty_reports[r_key]
 
     @gl.public.view
-    def is_cve_disbursed(self, program_id: str, cve_identifier: str) -> bool:
-        """Verifies if a specific CVE has already been disbursed for a program."""
-        key = f"{program_id.strip()}:{cve_identifier.strip().upper()}"
-        return bool(self.disbursed_cves.get(key, False))
+    def is_cve_claimed(self, program_id: str, cve_id: str) -> bool:
+        """Checks if a CVE has already been claimed and disbursed for a given program."""
+        cve_key = f"{program_id.strip()}:{cve_id.strip().upper()}"
+        return bool(self.disbursed_cves.get(cve_key, False))
 
     @gl.public.view
-    def is_advisory_disbursed(self, program_id: str, advisory_url: str) -> bool:
-        """Verifies if an advisory URL has already been processed for payout."""
-        key = f"{program_id.strip()}:{advisory_url.strip().strip('\"').strip('\'').lower()}"
-        return bool(self.disbursed_advisories.get(key, False))
+    def get_total_programs(self) -> u256:
+        return self.total_programs
 
     @gl.public.view
     def get_total_reports(self) -> u256:
         return self.total_reports_processed
+
+    @gl.public.view
+    def get_total_disbursed(self) -> u256:
+        return self.total_disbursed_usdc

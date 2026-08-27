@@ -263,15 +263,18 @@ class AegisBugBounty(gl.Contract):
 
         criteria = (
             "AegisBugBounty Equivalence Rule:\n"
-            "1. Strict Fields (100% exact match required):\n"
+            "1. Strict Fields (100% exact match required across all validator nodes):\n"
             "   - clock_fresh (boolean: true)\n"
             "   - today_date (YYYY-MM-DD)\n"
             "   - advisory_valid (boolean: true)\n"
+            "   - cve_identifier (exact uppercase CVE/Bug string matching advisory e.g. 'CVE-2026-8891')\n"
             "   - security_verdict (enum 'CRITICAL_EXPLOIT_VERIFIED', 'MEDIUM_SEVERITY_APPROVED', 'INVALID_REJECTED')\n"
             "Independently audit vulnerability data. REJECT the leader proposal if:\n"
-            "(1) security_verdict is marked CRITICAL_EXPLOIT_VERIFIED when exploit is unconfirmed or CVSS < 8.5,\n"
-            "(2) security_verdict is marked INVALID_REJECTED when valid zero-day exploit and patch are provided,\n"
-            "(3) advisory_valid is marked false or clock_fresh is marked false.\n"
+            "(1) cve_identifier does not exactly match the primary CVE ID or vulnerability identifier declared in the advisory,\n"
+            "(2) security_verdict is marked CRITICAL_EXPLOIT_VERIFIED when exploit is unconfirmed or CVSS < 8.5,\n"
+            "(3) security_verdict is marked INVALID_REJECTED when valid zero-day exploit and patch are provided,\n"
+            "(4) advisory_valid is marked false or clock_fresh is marked false,\n"
+            "(5) cvss_score_x10 contradicts the CVSS score in the advisory by more than 1.0 points.\n"
             "Output must be valid JSON matching the schema."
         )
 
